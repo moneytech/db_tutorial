@@ -61,14 +61,12 @@ Lastly, we pass the prepared statement to `execute_statement`. This function wil
 Notice that two of our new functions return enums indicating success or failure:
 
 ```c
-enum MetaCommandResult_t {
+typedef enum {
   META_COMMAND_SUCCESS,
   META_COMMAND_UNRECOGNIZED_COMMAND
-};
-typedef enum MetaCommandResult_t MetaCommandResult;
+} MetaCommandResult;
 
-enum PrepareResult_t { PREPARE_SUCCESS, PREPARE_UNRECOGNIZED_STATEMENT };
-typedef enum PrepareResult_t PrepareResult;
+typedef enum { PREPARE_SUCCESS, PREPARE_UNRECOGNIZED_STATEMENT } PrepareResult;
 ```
 
 "Unrecognized statement"? That seems a bit like an exception. But [exceptions are bad](https://www.youtube.com/watch?v=EVhCUSgNbzo) (and C doesn't even support them), so I'm using enum result codes wherever practical. The C compiler will complain if my switch statement doesn't handle a member of the enum, so we can feel a little more confident we handle every result of a function. Expect more result codes to be added in the future.
@@ -88,13 +86,11 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer) {
 Our "prepared statement" right now just contains an enum with two possible values. It will contain more data as we allow parameters in statements:
 
 ```c
-enum StatementType_t { STATEMENT_INSERT, STATEMENT_SELECT };
-typedef enum StatementType_t StatementType;
+typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 
-struct Statement_t {
+typedef struct {
   StatementType type;
-};
-typedef struct Statement_t Statement;
+} Statement;
 ```
 
 `prepare_statement` (our "SQL Compiler") does not understand SQL right now. In fact, it only understands two words:
@@ -153,35 +149,31 @@ The skeleton of our database is taking shape... wouldn't it be nice if it stored
 
 ```diff
 @@ -10,6 +10,23 @@ struct InputBuffer_t {
- };
- typedef struct InputBuffer_t InputBuffer;
+ } InputBuffer;
  
-+enum MetaCommandResult_t {
++typedef enum {
 +  META_COMMAND_SUCCESS,
 +  META_COMMAND_UNRECOGNIZED_COMMAND
-+};
-+typedef enum MetaCommandResult_t MetaCommandResult;
++} MetaCommandResult;
 +
-+enum PrepareResult_t { PREPARE_SUCCESS, PREPARE_UNRECOGNIZED_STATEMENT };
-+typedef enum PrepareResult_t PrepareResult;
++typedef enum { PREPARE_SUCCESS, PREPARE_UNRECOGNIZED_STATEMENT } PrepareResult;
 +
-+enum StatementType_t { STATEMENT_INSERT, STATEMENT_SELECT };
-+typedef enum StatementType_t StatementType;
++typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 +
-+struct Statement_t {
++typedef struct {
 +  StatementType type;
-+};
-+typedef struct Statement_t Statement;
++} Statement;
 +
  InputBuffer* new_input_buffer() {
    InputBuffer* input_buffer = malloc(sizeof(InputBuffer));
    input_buffer->buffer = NULL;
-@@ -35,16 +52,66 @@ void read_input(InputBuffer* input_buffer) {
-   input_buffer->buffer[bytes_read - 1] = 0;
+@@ -40,17 +57,67 @@ void close_input_buffer(InputBuffer* input_buffer) {
+     free(input_buffer);
  }
  
 +MetaCommandResult do_meta_command(InputBuffer* input_buffer) {
 +  if (strcmp(input_buffer->buffer, ".exit") == 0) {
++    close_input_buffer(input_buffer);
 +    exit(EXIT_SUCCESS);
 +  } else {
 +    return META_COMMAND_UNRECOGNIZED_COMMAND;
@@ -220,6 +212,7 @@ The skeleton of our database is taking shape... wouldn't it be nice if it stored
      read_input(input_buffer);
  
 -    if (strcmp(input_buffer->buffer, ".exit") == 0) {
+-      close_input_buffer(input_buffer);
 -      exit(EXIT_SUCCESS);
 -    } else {
 -      printf("Unrecognized command '%s'.\n", input_buffer->buffer);

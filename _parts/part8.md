@@ -9,7 +9,7 @@ We're changing the format of our table from an unsorted array of rows to a B-Tre
 
 With the current format, each page stores only rows (no metadata) so it is pretty space efficient. Insertion is also fast because we just append to the end. However, finding a particular row can only be done by scanning the entire table. And if we want to delete a row, we have to fill in the hole by moving every row that comes after it.
 
-If we stored the table as an array, but kept rows sorted by id, we could use binary search to find a particular id. However, insertion would have the same problem as deletion where we have to move a lot of rows to make space.
+If we stored the table as an array, but kept rows sorted by id, we could use binary search to find a particular id. However, insertion would be slow because we would have to move a lot of rows to make space.
 
 Instead, we're going with a tree structure. Each node in the tree can contain a variable number of rows, so we have to store some information in each node to keep track of how many rows it contains. Plus there is the storage overhead of all the internal nodes which don't store any rows. In exchange for a larger database file, we get fast insertion, deletion and lookup.
 
@@ -26,8 +26,7 @@ Instead, we're going with a tree structure. Each node in the tree can contain a 
 Leaf nodes and internal nodes have different layouts. Let's make an enum to keep track of node type:
 
 ```diff
-+enum NodeType_t { NODE_INTERNAL, NODE_LEAF };
-+typedef enum NodeType_t NodeType;
++typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 ```
 
 Each node will correspond to one page. Internal nodes will point to their children by storing the page number that stores the child. The btree asks the pager for a particular page number and gets back a pointer into the page cache. Pages are stored in the database file one after the other in order of page number.
@@ -93,11 +92,11 @@ The code to access keys, values and metadata all involve pointer arithmetic usin
 
 ```diff
 +uint32_t* leaf_node_num_cells(void* node) {
-+  return (char *)node + LEAF_NODE_NUM_CELLS_OFFSET;
++  return node + LEAF_NODE_NUM_CELLS_OFFSET;
 +}
 +
 +void* leaf_node_cell(void* node, uint32_t cell_num) {
-+  return (char *)node + LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE;
++  return node + LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE;
 +}
 +
 +uint32_t* leaf_node_key(void* node, uint32_t cell_num) {
@@ -175,20 +174,18 @@ Now it makes more sense to store the number of pages in our database rather than
 -const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
 -const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
  
- struct Pager_t {
+ typedef struct {
    int file_descriptor;
    uint32_t file_length;
 +  uint32_t num_pages;
    void* pages[TABLE_MAX_PAGES];
- };
- typedef struct Pager_t Pager;
+ } Pager;
  
- struct Table_t {
+ typedef struct {
    Pager* pager;
 -  uint32_t num_rows;
 +  uint32_t root_page_num;
- };
- typedef struct Table_t Table;
+ } Table;
 ```
 
 ```diff
@@ -226,14 +223,13 @@ Now it makes more sense to store the number of pages in our database rather than
 A cursor represents a position in the table. When our table was a simple array of rows, we could access a row given just the row number. Now that it's a tree, we identify a position by the page number of the node, and the cell number within that node.
 
 ```diff
- struct Cursor_t {
+ typedef struct {
    Table* table;
 -  uint32_t row_num;
 +  uint32_t page_num;
 +  uint32_t cell_num;
    bool end_of_table;  // Indicates a position one past the last element
- };
- typedef struct Cursor_t Cursor;
+ } Cursor;
 ```
 
 ```diff
@@ -298,7 +294,7 @@ A cursor represents a position in the table. When our table was a simple array o
 
 ## Insertion Into a Leaf Node
 
-In this article we're only going to implement enough to get get a single-node tree. Recall from last article that a tree starts out as an empty leaf node:
+In this article we're only going to implement enough to get a single-node tree. Recall from last article that a tree starts out as an empty leaf node:
 
 {% include image.html url="assets/images/btree1.png" description="empty btree" %}
 
@@ -316,6 +312,7 @@ When we open the database for the first time, the database file will be empty, s
    Table* table = malloc(sizeof(Table));
    table->pager = pager;
 -  table->num_rows = num_rows;
++  table->root_page_num = 0;
 +
 +  if (pager->num_pages == 0) {
 +    // New database file. Initialize page 0 as leaf node.
@@ -502,40 +499,35 @@ Next time, we'll implement finding a record by primary key, and start storing ro
 ## Complete Diff
 
 ```diff
+@@ -62,29 +62,101 @@ const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+
  const uint32_t PAGE_SIZE = 4096;
- const uint32_t TABLE_MAX_PAGES = 100;
+ #define TABLE_MAX_PAGES 100
 -const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
 -const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
  
- struct Pager_t {
+ typedef struct {
    int file_descriptor;
    uint32_t file_length;
 +  uint32_t num_pages;
    void* pages[TABLE_MAX_PAGES];
- };
- typedef struct Pager_t Pager;
+ } Pager;
  
- struct Table_t {
+ typedef struct {
    Pager* pager;
 -  uint32_t num_rows;
 +  uint32_t root_page_num;
- };
- typedef struct Table_t Table;
+ } Table;
  
- struct Cursor_t {
+ typedef struct {
    Table* table;
 -  uint32_t row_num;
 +  uint32_t page_num;
 +  uint32_t cell_num;
    bool end_of_table;  // Indicates a position one past the last element
- };
- typedef struct Cursor_t Cursor;
-@@ -88,6 +88,77 @@ void print_row(Row* row) {
-   printf("(%d, %s, %s)\n", row->id, row->username, row->email);
- }
- 
-+enum NodeType_t { NODE_INTERNAL, NODE_LEAF };
-+typedef enum NodeType_t NodeType;
+ } Cursor;
+
++typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 +
 +/*
 + * Common Node Header Layout
@@ -604,11 +596,11 @@ Next time, we'll implement finding a record by primary key, and start storing ro
 +  }
 +}
 +
- void serialize_row(Row* source, void* destination) {
-   memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-   memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE);
-@@ -100,6 +171,8 @@ void deserialize_row(void* source, Row* destination) {
-   memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+ void print_row(Row* row) {
+     printf("(%d, %s, %s)\n", row->id, row->username, row->email);
+ }
+@@ -101,6 +173,8 @@ void deserialize_row(void *source, Row* destination) {
+     memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
  }
  
 +void initialize_leaf_node(void* node) { *leaf_node_num_cells(node) = 0; }
@@ -616,7 +608,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
  void* get_page(Pager* pager, uint32_t page_num) {
    if (page_num > TABLE_MAX_PAGES) {
      printf("Tried to fetch page number out of bounds. %d > %d\n", page_num,
-@@ -127,6 +200,10 @@ void* get_page(Pager* pager, uint32_t page_num) {
+@@ -128,6 +202,10 @@ void* get_page(Pager* pager, uint32_t page_num) {
      }
  
      pager->pages[page_num] = page;
@@ -627,7 +619,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    }
  
    return pager->pages[page_num];
-@@ -135,8 +212,12 @@ void* get_page(Pager* pager, uint32_t page_num) {
+@@ -136,8 +214,12 @@ void* get_page(Pager* pager, uint32_t page_num) {
  Cursor* table_start(Table* table) {
    Cursor* cursor = malloc(sizeof(Cursor));
    cursor->table = table;
@@ -642,7 +634,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
  
    return cursor;
  }
-@@ -144,24 +225,28 @@ Cursor* table_start(Table* table) {
+@@ -145,24 +227,28 @@ Cursor* table_start(Table* table) {
  Cursor* table_end(Table* table) {
    Cursor* cursor = malloc(sizeof(Cursor));
    cursor->table = table;
@@ -679,7 +671,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
      cursor->end_of_table = true;
    }
  }
-@@ -184,6 +269,12 @@ Pager* pager_open(const char* filename) {
+@@ -185,6 +271,12 @@ Pager* pager_open(const char* filename) {
    Pager* pager = malloc(sizeof(Pager));
    pager->file_descriptor = fd;
    pager->file_length = file_length;
@@ -693,6 +685,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
      pager->pages[i] = NULL;
 @@ -194,11 +285,15 @@ Pager* pager_open(const char* filename) {
+@@ -195,11 +287,16 @@ Pager* pager_open(const char* filename) {
  
  Table* db_open(const char* filename) {
    Pager* pager = pager_open(filename);
@@ -701,6 +694,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    Table* table = malloc(sizeof(Table));
    table->pager = pager;
 -  table->num_rows = num_rows;
++  table->root_page_num = 0;
 +
 +  if (pager->num_pages == 0) {
 +    // New database file. Initialize page 0 as leaf node.
@@ -710,8 +704,8 @@ Next time, we'll implement finding a record by primary key, and start storing ro
  
    return table;
  }
-@@ -228,7 +323,7 @@ void read_input(InputBuffer* input_buffer) {
-   input_buffer->buffer[bytes_read - 1] = 0;
+@@ -234,7 +331,7 @@ void close_input_buffer(InputBuffer* input_buffer) {
+     free(input_buffer);
  }
  
 -void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
@@ -720,6 +714,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
      printf("Tried to flush null page\n");
      exit(EXIT_FAILURE);
 @@ -242,7 +337,7 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
+@@ -249,7 +346,7 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
    }
  
    ssize_t bytes_written =
@@ -729,6 +724,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    if (bytes_written == -1) {
      printf("Error writing: %d\n", errno);
 @@ -252,29 +347,16 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
+@@ -260,29 +357,16 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
  
  void db_close(Table* table) {
    Pager* pager = table->pager;
@@ -760,7 +756,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    int result = close(pager->file_descriptor);
    if (result == -1) {
      printf("Error closing db file.\n");
-@@ -294,6 +376,14 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table) {
+@@ -305,6 +389,14 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table *table) {
    if (strcmp(input_buffer->buffer, ".exit") == 0) {
      db_close(table);
      exit(EXIT_SUCCESS);
@@ -775,7 +771,7 @@ Next time, we'll implement finding a record by primary key, and start storing ro
    } else {
      return META_COMMAND_UNRECOGNIZED_COMMAND;
    }
-@@ -342,16 +432,39 @@ PrepareResult prepare_statement(InputBuffer* input_buffer,
+@@ -354,16 +446,39 @@ PrepareResult prepare_statement(InputBuffer* input_buffer,
    return PREPARE_UNRECOGNIZED_STATEMENT;
  }
  
